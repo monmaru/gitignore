@@ -15,11 +15,14 @@ func New(c *cli.Context) {
 		f := ".gitignore"
 		if _, err := os.Stat(f); err == nil {
 			fmt.Println("--------------------------------------")
-			fmt.Printf("%s exists\n", f)
+			fmt.Printf("%s already exists\n", f)
 			fmt.Println("--------------------------------------")
 			return
 		}
 
 		check(ioutil.WriteFile(f, []byte(gi.GetSource()), 0666))
+		fmt.Println("--------------------------------------")
+		fmt.Printf("%s was created\n", f)
+		fmt.Println("--------------------------------------")
 	})
 }
