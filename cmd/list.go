@@ -8,7 +8,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-// List ...
+// List lists templates of .gitignore.
 func List(c *cli.Context) {
 	ctx := context.Background()
 	client := github.NewClient(nil)

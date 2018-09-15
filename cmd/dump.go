@@ -7,7 +7,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-// Dump ...
+// Dump standard outputs .gitignore.
 func Dump(c *cli.Context) {
 	fetchGitignore(func(gi *github.Gitignore) {
 		fmt.Println(gi.GetSource())

@@ -9,7 +9,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-// New ...
+// New creates a .gitignore to current directory
 func New(c *cli.Context) {
 	fetchGitignore(func(gi *github.Gitignore) {
 		f := ".gitignore"
