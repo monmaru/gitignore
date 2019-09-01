@@ -3,7 +3,9 @@
 package tty
 
 import (
+	"context"
 	"os"
+	"errors"
 	"syscall"
 	"unsafe"
 
@@ -122,11 +124,13 @@ type charInfo struct {
 }
 
 type TTY struct {
-	in  *os.File
-	out *os.File
-	st  uint32
-	rs  []rune
-	ws  chan WINSIZE
+	in                *os.File
+	out               *os.File
+	st                uint32
+	rs                []rune
+	ws                chan WINSIZE
+	sigwinchCtx       context.Context
+	sigwinchCtxCancel context.CancelFunc
 }
 
 func readConsoleInput(fd uintptr, record *inputRecord) (err error) {
@@ -143,11 +147,12 @@ func open() (*TTY, error) {
 	if false && isatty.IsTerminal(os.Stdin.Fd()) {
 		tty.in = os.Stdin
 	} else {
-		conin, err := os.Open("CONIN$")
+		in, err := syscall.Open("CONIN$", syscall.O_RDWR, 0)
 		if err != nil {
 			return nil, err
 		}
-		tty.in = conin
+
+		tty.in = os.NewFile(uintptr(in), "/dev/tty")
 	}
 
 	if isatty.IsTerminal(os.Stdout.Fd()) {
@@ -177,12 +182,12 @@ func open() (*TTY, error) {
 	st &^= enableWindowInput
 	st &^= enableExtendedFlag
 	st &^= enableQuickEditMode
-	st |= enableProcessedInput
 
 	// ignore error
 	procSetConsoleMode.Call(h, uintptr(st))
 
 	tty.ws = make(chan WINSIZE)
+	tty.sigwinchCtx, tty.sigwinchCtxCancel = context.WithCancel(context.Background())
 
 	return tty, nil
 }
@@ -206,9 +211,23 @@ func (tty *TTY) readRune() (rune, error) {
 	switch ir.eventType {
 	case windowBufferSizeEvent:
 		wr := (*windowBufferSizeRecord)(unsafe.Pointer(&ir.event))
-		tty.ws <- WINSIZE{
+		ws := WINSIZE{
 			W: int(wr.size.x),
 			H: int(wr.size.y),
+		}
+
+		if err := tty.sigwinchCtx.Err(); err != nil {
+			// closing
+			// the following select might panic without this guard close
+			return 0, err
+		}
+
+		select {
+		case tty.ws <- ws:
+		case <-tty.sigwinchCtx.Done():
+			return 0, tty.sigwinchCtx.Err()
+		default:
+			return 0, nil // no one is currently trying to read
 		}
 	case keyEvent:
 		kr := (*keyEventRecord)(unsafe.Pointer(&ir.event))
@@ -228,6 +247,37 @@ func (tty *TTY) readRune() (rune, error) {
 				return rune(kr.unicodeChar), nil
 			}
 			vk := kr.virtualKeyCode
+			if kr.controlKeyState&ctrlPressed != 0 {
+				switch vk {
+				case 0x21: // ctrl-page-up
+					tty.rs = []rune{0x5b, 0x35, 0x3B, 0x35, 0x7e}
+					return rune(0x1b), nil
+				case 0x22: // ctrl-page-down
+					tty.rs = []rune{0x5b, 0x36, 0x3B, 0x35, 0x7e}
+					return rune(0x1b), nil
+				case 0x23: // ctrl-end
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x46}
+					return rune(0x1b), nil
+				case 0x24: // ctrl-home
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x48}
+					return rune(0x1b), nil
+				case 0x25: // ctrl-left
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x44}
+					return rune(0x1b), nil
+				case 0x26: // ctrl-up
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x41}
+					return rune(0x1b), nil
+				case 0x27: // ctrl-right
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x43}
+					return rune(0x1b), nil
+				case 0x28: // ctrl-down
+					tty.rs = []rune{0x5b, 0x31, 0x3B, 0x35, 0x42}
+					return rune(0x1b), nil
+				case 0x2e: // ctrl-delete
+					tty.rs = []rune{0x5b, 0x33, 0x3B, 0x35, 0x7e}
+					return rune(0x1b), nil
+				}
+			}
 			switch vk {
 			case 0x21: // page-up
 				tty.rs = []rune{0x5b, 0x35, 0x7e}
@@ -276,8 +326,9 @@ func (tty *TTY) readRune() (rune, error) {
 }
 
 func (tty *TTY) close() error {
-	close(tty.ws)
 	procSetConsoleMode.Call(tty.in.Fd(), uintptr(tty.st))
+	tty.sigwinchCtxCancel()
+	close(tty.ws)
 	return nil
 }
 
@@ -288,6 +339,15 @@ func (tty *TTY) size() (int, int, error) {
 		return 0, 0, err
 	}
 	return int(csbi.window.right - csbi.window.left + 1), int(csbi.window.bottom - csbi.window.top + 1), nil
+}
+
+func (tty *TTY) sizePixel() (int, int, int, int, error) {
+	x, y, err := tty.size()
+	if err != nil {
+		x = -1
+		y = -1
+	}
+	return x, y, -1, -1, errors.New("no implemented method for querying size in pixels on Windows")
 }
 
 func (tty *TTY) input() *os.File {
@@ -318,6 +378,6 @@ func (tty *TTY) raw() (func() error, error) {
 	}, nil
 }
 
-func (tty *TTY) sigwinch() chan WINSIZE {
+func (tty *TTY) sigwinch() <-chan WINSIZE {
 	return tty.ws
 }
